@@ -33,13 +33,14 @@ Keep all responses short, friendly, and suitable for WhatsApp. One or two senten
 
 async function getChatReply(message) {
   const completion = await openai.chat.completions.create({
-    model: "gpt-4o",
+    model: "gpt-4o-mini",
     max_tokens: 256,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: message },
     ],
   });
+
   return completion.choices[0]?.message?.content ?? "";
 }
 
@@ -53,16 +54,17 @@ app.get("/", (_req, res) => {
 
 app.post("/api/chat-simple", async (req, res) => {
   const message = (req.body.message ?? "").trim();
+
   if (!message) {
     return res.status(400).json({ error: "message is required" });
   }
 
   try {
     const reply = await getChatReply(message);
-    res.json({ reply });
+    return res.json({ reply });
   } catch (err) {
-    console.error("chat-simple error:", err.message);
-    res.status(500).json({ error: "Failed to get response from OpenAI" });
+    console.error("chat-simple error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to get response from OpenAI" });
   }
 });
 
@@ -75,15 +77,21 @@ app.post("/webhook/twilio", async (req, res) => {
   }
 
   try {
-    const reply = await getChatReply(incomingMessage);
+    const reply =
+      (await getChatReply(incomingMessage)) ||
+      "Sorry, I couldn't generate a reply right now.";
+
     const twiml = new twilio.twiml.MessagingResponse();
     twiml.message(reply);
-    res.type("text/xml").send(twiml.toString());
+
+    return res.type("text/xml").send(twiml.toString());
   } catch (err) {
-    console.error("Twilio webhook error:", err.message);
+    console.error("Twilio webhook error:", err?.message || err);
+
     const twiml = new twilio.twiml.MessagingResponse();
     twiml.message("Sorry, I could not process your message. Please try again.");
-    res.type("text/xml").send(twiml.toString());
+
+    return res.type("text/xml").send(twiml.toString());
   }
 });
 
