@@ -20,39 +20,49 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// fallback inteligente (quando o aluno foge do script)
-async function aiFallback(message) {
+// ================= AI CORRECTION =================
+async function correctAndRespond(userInput, instruction) {
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      max_tokens: 100,
+      max_tokens: 120,
       messages: [
         {
           role: "system",
-          content:
-            "You are a friendly English tutor. Reply briefly and guide the student back to the lesson.",
+          content: `
+You are a friendly British English tutor.
+
+Your job:
+1. If the student's sentence has a mistake → correct it naturally
+2. If correct → briefly acknowledge
+3. Continue the lesson based on instruction
+
+RULES:
+- Keep it VERY short (1–2 sentences)
+- Be natural (like WhatsApp)
+- No explanations
+- No grammar terms
+
+Examples:
+Student: I fine
+Reply: I'm fine 🙂 Good. (continue)
+
+Student: My name is John
+Reply: Nice 🙂 (continue)
+`,
         },
-        { role: "user", content: message },
+        {
+          role: "user",
+          content: `Student: "${userInput}" \nNext step: ${instruction}`,
+        },
       ],
     });
 
     return completion.choices[0]?.message?.content || "";
-  } catch {
-    return "Let's continue the lesson 🙂";
+  } catch (err) {
+    console.error("AI error:", err.message);
+    return instruction;
   }
-}
-
-// ================= HELPERS =================
-function cleanName(text) {
-  return text.replace(/my name is/i, "").trim();
-}
-
-function isShort(text) {
-  return text.length < 2;
-}
-
-function looksLikePhone(text) {
-  return /[0-9]/.test(text);
 }
 
 // ================= EXPRESS =================
@@ -61,10 +71,10 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.get("/", (_req, res) => {
-  res.send("Highlands server is running");
+  res.send("Highlands server running");
 });
 
-// ================= TWILIO WEBHOOK =================
+// ================= TWILIO =================
 app.post("/webhook/twilio", async (req, res) => {
   const incoming = (req.body.Body || "").trim();
   const userId = req.body.From;
@@ -81,108 +91,109 @@ app.post("/webhook/twilio", async (req, res) => {
   let reply = "";
 
   try {
-    // ================= RESET =================
+    // ================= START =================
     if (incoming.toLowerCase() === "lesson 1") {
       state.step = 1;
       state.name = "";
       state.surname = "";
 
-      reply = "Hello. What is your name?";
+      reply = "Great! Let's start Lesson 1 🙂\n\nWhat's your name?";
     }
 
     // ================= STEP 1 — NAME =================
     else if (state.step === 1) {
-      if (isShort(incoming)) {
-        reply = "Please tell me your name 🙂";
-      } else {
-        state.name = cleanName(incoming);
-        state.step = 2;
+      state.name = incoming.replace(/my name is/i, "").trim();
+      state.step = 2;
 
-        reply = `Nice to meet you, ${state.name}. How are you today?`;
-      }
+      reply = `Nice to meet you, ${state.name}. How are you today?`;
     }
 
     // ================= STEP 2 — HOW ARE YOU =================
     else if (state.step === 2) {
       state.step = 3;
-      reply = "Good. What is your name?";
+
+      reply = await correctAndRespond(
+        incoming,
+        "Say: Good. This is John. He is a student. What is his name?"
+      );
     }
 
-    // ================= STEP 3 — NAME STRUCTURE =================
+    // ================= STEP 3 — HIS =================
     else if (state.step === 3) {
       state.step = 4;
-      reply = `Good. My name is James. What is my name?`;
+
+      reply = await correctAndRespond(
+        incoming,
+        "Say: Good. This is Anna. She is a teacher. What is her name?"
+      );
     }
 
-    // ================= STEP 4 — CONTEXT (HIS) =================
+    // ================= STEP 4 — HER =================
     else if (state.step === 4) {
       state.step = 5;
-      reply = "This is John. He is a student. What is his name?";
+
+      reply = await correctAndRespond(
+        incoming,
+        "Ask: What is your surname?"
+      );
     }
 
-    // ================= STEP 5 — CONTEXT (HER) =================
+    // ================= STEP 5 — SURNAME =================
     else if (state.step === 5) {
+      state.surname = incoming;
       state.step = 6;
-      reply = "Good. This is Anna. She is a teacher. What is her name?";
+
+      reply = await correctAndRespond(
+        incoming,
+        "Say: My surname is Smith. What is my surname?"
+      );
     }
 
-    // ================= STEP 6 — SURNAME =================
+    // ================= STEP 6 =================
     else if (state.step === 6) {
       state.step = 7;
-      reply = "What is your surname?";
+
+      reply = await correctAndRespond(
+        incoming,
+        "Ask: What is your phone number?"
+      );
     }
 
-    // ================= STEP 7 — SURNAME STRUCTURE =================
+    // ================= STEP 7 =================
     else if (state.step === 7) {
-      state.surname = incoming;
       state.step = 8;
 
-      reply = "My surname is Smith. What is my surname?";
+      reply = await correctAndRespond(
+        incoming,
+        "Say: Good 🙂 When you meet someone, you say 'nice to meet you'. What do you say?"
+      );
     }
 
-    // ================= STEP 8 — PHONE =================
+    // ================= STEP 8 =================
     else if (state.step === 8) {
       state.step = 9;
-      reply = "What is your phone number?";
+
+      reply = await correctAndRespond(
+        incoming,
+        "Ask: Are you Mr, Mrs, or Miss?"
+      );
     }
 
-    // ================= STEP 9 — PHONE VALIDATION =================
+    // ================= STEP 9 =================
     else if (state.step === 9) {
-      if (!looksLikePhone(incoming)) {
-        reply = "Please use numbers 🙂";
-      } else {
-        state.step = 10;
-        reply =
-          "Good. When you meet someone, you say: nice to meet you. What do you say?";
-      }
-    }
+      state.step = 10;
 
-    // ================= STEP 10 — POLITE =================
-    else if (state.step === 10) {
-      state.step = 11;
-      reply = "Good. Are you Mr, Mrs, or Miss?";
-    }
-
-    // ================= STEP 11 — TITLES =================
-    else if (state.step === 11) {
-      state.step = 12;
-      reply = "Good. Am I Mr Smith?";
+      reply = await correctAndRespond(
+        incoming,
+        "Ask: Am I Mr Smith?"
+      );
     }
 
     // ================= FINAL =================
-    else if (state.step === 12) {
-      state.step = 999;
-
-      reply =
-        "Excellent. Lesson complete 🎉 Type 'Lesson 1' to restart.";
-    }
-
-    // ================= FALLBACK =================
     else {
-      reply = await aiFallback(incoming);
+      reply = "Excellent 🎉 Lesson complete. Type 'Lesson 1' to restart.";
     }
 
-    // ================= SEND =================
     const twiml = new twilio.twiml.MessagingResponse();
     twiml.message(reply);
 
@@ -199,5 +210,5 @@ app.post("/webhook/twilio", async (req, res) => {
 
 // ================= START =================
 app.listen(PORT, () => {
-  console.log(`Highlands server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
