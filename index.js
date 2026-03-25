@@ -7,59 +7,46 @@ import twilio from "twilio";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ================= STATE =================
 const userState = {};
-
-// ================= OPENAI =================
-if (!process.env.OPENAI_API_KEY) {
-  console.error("Missing OPENAI_API_KEY");
-  process.exit(1);
-}
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ================= AI EVALUATION =================
-async function evaluateAnswer(userInput, expectedPattern, correctAnswer) {
+// ================= NORMALIZADOR =================
+const normalize = (text) =>
+  text.toLowerCase().replace(/[^\w\s]/g, "").trim();
+
+// ================= VALIDAÇÃO FORTE =================
+function checkAnswer(input, validAnswers) {
+  const cleaned = normalize(input);
+  return validAnswers.some((ans) => cleaned === normalize(ans));
+}
+
+// ================= IA (fallback leve) =================
+async function aiCheck(input, correct) {
   try {
-    const completion = await openai.chat.completions.create({
+    const res = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      max_tokens: 60,
+      max_tokens: 40,
       messages: [
         {
           role: "system",
-          content: `
-You are an English teacher.
-
-Rules:
-- If correct → reply ONLY: CORRECT
-- If incorrect → reply ONLY with the correct sentence
-- No explanations
-- No extra text
-`,
+          content:
+            "Say CORRECT or give the corrected sentence only. No explanation.",
         },
         {
           role: "user",
-          content: `
-Student: "${userInput}"
-Expected: ${expectedPattern}
-Correct answer: ${correctAnswer}
-`,
+          content: `Student: ${input} | Correct: ${correct}`,
         },
       ],
     });
 
-    const result = completion.choices[0]?.message?.content?.trim();
-
-    if (!result || result.toUpperCase().includes("CORRECT")) {
-      return { correct: true };
-    }
-
-    return { correct: false, correction: result };
-  } catch (err) {
-    console.error(err);
-    return { correct: true };
+    const text = res.choices[0]?.message?.content?.trim();
+    if (!text || text.toUpperCase().includes("CORRECT")) return null;
+    return text;
+  } catch {
+    return null;
   }
 }
 
@@ -68,8 +55,8 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.get("/", (_req, res) => {
-  res.send("Highlands server running");
+app.get("/", (_, res) => {
+  res.send("Server running");
 });
 
 // ================= TWILIO =================
@@ -78,29 +65,24 @@ app.post("/webhook/twilio", async (req, res) => {
   const userId = req.body.From;
 
   if (!userState[userId]) {
-    userState[userId] = {
-      step: 0,
-      name: "",
-      surname: "",
-    };
+    userState[userId] = { step: 0, name: "" };
   }
 
   const state = userState[userId];
   const twiml = new twilio.twiml.MessagingResponse();
 
   try {
-    // ========= START =========
+    // ===== START =====
     if (incoming.toLowerCase() === "lesson 1") {
       state.step = 1;
       state.name = "";
-      state.surname = "";
 
-      twiml.message("Great! Let's start Lesson 1 🙂");
-      twiml.message("What's your name?");
+      twiml.message("Hello 🙂 Ready? Let’s begin Lesson 1.");
+      twiml.message("What’s your name?");
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ========= STEP 1 — NAME =========
+    // ===== STEP 1 =====
     if (state.step === 1) {
       state.name = incoming.replace(/my name is/i, "").trim();
       state.step = 2;
@@ -110,72 +92,64 @@ app.post("/webhook/twilio", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ========= STEP 2 — HOW ARE YOU =========
+    // ===== STEP 2 =====
     if (state.step === 2) {
-      const evalRes = await evaluateAnswer(
-        incoming,
-        "I am fine / I'm fine",
-        "I'm fine."
-      );
+      const valid = [
+        "i am fine",
+        "im fine",
+        "i'm fine",
+        "fine",
+      ];
 
-      if (!evalRes.correct) {
+      if (!checkAnswer(incoming, valid)) {
+        const aiCorrection = await aiCheck(incoming, "I'm fine.");
+        const correction = aiCorrection || "I'm fine.";
+
         twiml.message(`❌ ${incoming}`);
-        twiml.message(`✅ ${evalRes.correction}`);
+        twiml.message(`✅ ${correction}`);
         return res.type("text/xml").send(twiml.toString());
       }
 
       state.step = 3;
-
       twiml.message("Good 🙂");
       twiml.message("This is John. He is a student. What is his name?");
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ========= STEP 3 — HIS =========
+    // ===== STEP 3 =====
     if (state.step === 3) {
-      const evalRes = await evaluateAnswer(
-        incoming,
-        "His name is John",
-        "His name is John."
-      );
+      const valid = ["his name is john"];
 
-      if (!evalRes.correct) {
+      if (!checkAnswer(incoming, valid)) {
         twiml.message(`❌ ${incoming}`);
-        twiml.message(`✅ ${evalRes.correction}`);
+        twiml.message(`✅ His name is John.`);
         return res.type("text/xml").send(twiml.toString());
       }
 
       state.step = 4;
-
       twiml.message("Good 🙂");
       twiml.message("This is Anna. She is a teacher. What is her name?");
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ========= STEP 4 — HER =========
+    // ===== STEP 4 =====
     if (state.step === 4) {
-      const evalRes = await evaluateAnswer(
-        incoming,
-        "Her name is Anna",
-        "Her name is Anna."
-      );
+      const valid = ["her name is anna"];
 
-      if (!evalRes.correct) {
+      if (!checkAnswer(incoming, valid)) {
         twiml.message(`❌ ${incoming}`);
-        twiml.message(`✅ ${evalRes.correction}`);
+        twiml.message(`✅ Her name is Anna.`);
         return res.type("text/xml").send(twiml.toString());
       }
 
       state.step = 5;
-
       twiml.message("Good 🙂");
       twiml.message("What is your surname?");
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ========= STEP 5 — SURNAME =========
+    // ===== STEP 5 =====
     if (state.step === 5) {
-      state.surname = incoming;
       state.step = 6;
 
       twiml.message("Good 🙂");
@@ -183,28 +157,23 @@ app.post("/webhook/twilio", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ========= STEP 6 =========
+    // ===== STEP 6 =====
     if (state.step === 6) {
-      const evalRes = await evaluateAnswer(
-        incoming,
-        "Your surname is Smith",
-        "Your surname is Smith."
-      );
+      const valid = ["your surname is smith"];
 
-      if (!evalRes.correct) {
+      if (!checkAnswer(incoming, valid)) {
         twiml.message(`❌ ${incoming}`);
-        twiml.message(`✅ ${evalRes.correction}`);
+        twiml.message(`✅ Your surname is Smith.`);
         return res.type("text/xml").send(twiml.toString());
       }
 
       state.step = 7;
-
       twiml.message("Good 🙂");
       twiml.message("What is your phone number?");
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ========= STEP 7 =========
+    // ===== STEP 7 =====
     if (state.step === 7) {
       state.step = 8;
 
@@ -213,28 +182,23 @@ app.post("/webhook/twilio", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ========= STEP 8 =========
+    // ===== STEP 8 =====
     if (state.step === 8) {
-      const evalRes = await evaluateAnswer(
-        incoming,
-        "Nice to meet you",
-        "Nice to meet you."
-      );
+      const valid = ["nice to meet you"];
 
-      if (!evalRes.correct) {
+      if (!checkAnswer(incoming, valid)) {
         twiml.message(`❌ ${incoming}`);
-        twiml.message(`✅ ${evalRes.correction}`);
+        twiml.message(`✅ Nice to meet you.`);
         return res.type("text/xml").send(twiml.toString());
       }
 
       state.step = 9;
-
       twiml.message("Good 🙂");
       twiml.message("Are you Mr, Mrs, or Miss?");
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ========= STEP 9 =========
+    // ===== STEP 9 =====
     if (state.step === 9) {
       state.step = 10;
 
@@ -243,18 +207,17 @@ app.post("/webhook/twilio", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ========= FINAL =========
+    // ===== FINAL =====
     twiml.message("Excellent 🎉 Lesson complete. Type 'Lesson 1' to restart.");
     return res.type("text/xml").send(twiml.toString());
+
   } catch (err) {
     console.error(err);
-
-    twiml.message("Something went wrong. Please try again.");
+    twiml.message("Something went wrong.");
     return res.type("text/xml").send(twiml.toString());
   }
 });
 
-// ================= START =================
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
