@@ -1,7 +1,6 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import OpenAI from "openai";
 import twilio from "twilio";
 
 const app = express();
@@ -9,45 +8,48 @@ const PORT = process.env.PORT || 3000;
 
 const userState = {};
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-// ================= NORMALIZADOR =================
+// ================= UTIL =================
 const normalize = (text) =>
   text.toLowerCase().replace(/[^\w\s]/g, "").trim();
 
-// ================= VALIDAÇÃO FORTE =================
-function checkAnswer(input, validAnswers) {
-  const cleaned = normalize(input);
-  return validAnswers.some((ans) => cleaned === normalize(ans));
+// ================= VALIDAÇÕES =================
+
+// Nome válido
+function extractName(input) {
+  const clean = normalize(input);
+
+  if (clean.startsWith("my name is ")) {
+    return clean.replace("my name is ", "").trim();
+  }
+
+  if (clean.startsWith("i am ") || clean.startsWith("im ")) {
+    return clean.replace("i am ", "").replace("im ", "").trim();
+  }
+
+  // Nome simples (ex: Hector)
+  if (/^[a-z]+$/.test(clean)) {
+    return clean;
+  }
+
+  return null;
 }
 
-// ================= IA (fallback leve) =================
-async function aiCheck(input, correct) {
-  try {
-    const res = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      max_tokens: 40,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Say CORRECT or give the corrected sentence only. No explanation.",
-        },
-        {
-          role: "user",
-          content: `Student: ${input} | Correct: ${correct}`,
-        },
-      ],
-    });
+// Resposta "I'm fine"
+function isFineAnswer(input) {
+  const clean = normalize(input);
+  return ["i am fine", "im fine", "i'm fine", "fine"].includes(clean);
+}
 
-    const text = res.choices[0]?.message?.content?.trim();
-    if (!text || text.toUpperCase().includes("CORRECT")) return null;
-    return text;
-  } catch {
-    return null;
-  }
+// Resposta correta genérica
+function isExact(input, correct) {
+  return normalize(input) === normalize(correct);
+}
+
+// ================= HELPER =================
+function sendCorrection(twiml, wrong, correct, question) {
+  twiml.message(`❌ ${wrong}`);
+  twiml.message(`✅ ${correct}`);
+  twiml.message(question);
 }
 
 // ================= EXPRESS =================
@@ -60,7 +62,7 @@ app.get("/", (_, res) => {
 });
 
 // ================= TWILIO =================
-app.post("/webhook/twilio", async (req, res) => {
+app.post("/webhook/twilio", (req, res) => {
   const incoming = (req.body.Body || "").trim();
   const userId = req.body.From;
 
@@ -82,9 +84,23 @@ app.post("/webhook/twilio", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ===== STEP 1 =====
+    // ===== STEP 1 — NAME =====
     if (state.step === 1) {
-      state.name = incoming.replace(/my name is/i, "").trim();
+      const name = extractName(incoming);
+
+      if (!name) {
+        return sendResponse(
+          res,
+          sendCorrection(
+            twiml,
+            incoming,
+            "My name is John.",
+            "What’s your name?"
+          )
+        );
+      }
+
+      state.name = capitalize(name);
       state.step = 2;
 
       twiml.message(`Nice to meet you, ${state.name}.`);
@@ -92,21 +108,15 @@ app.post("/webhook/twilio", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ===== STEP 2 =====
+    // ===== STEP 2 — HOW ARE YOU =====
     if (state.step === 2) {
-      const valid = [
-        "i am fine",
-        "im fine",
-        "i'm fine",
-        "fine",
-      ];
-
-      if (!checkAnswer(incoming, valid)) {
-        const aiCorrection = await aiCheck(incoming, "I'm fine.");
-        const correction = aiCorrection || "I'm fine.";
-
-        twiml.message(`❌ ${incoming}`);
-        twiml.message(`✅ ${correction}`);
+      if (!isFineAnswer(incoming)) {
+        sendCorrection(
+          twiml,
+          incoming,
+          "I'm fine.",
+          "How are you today?"
+        );
         return res.type("text/xml").send(twiml.toString());
       }
 
@@ -116,13 +126,15 @@ app.post("/webhook/twilio", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ===== STEP 3 =====
+    // ===== STEP 3 — HIS NAME =====
     if (state.step === 3) {
-      const valid = ["his name is john"];
-
-      if (!checkAnswer(incoming, valid)) {
-        twiml.message(`❌ ${incoming}`);
-        twiml.message(`✅ His name is John.`);
+      if (!isExact(incoming, "His name is John")) {
+        sendCorrection(
+          twiml,
+          incoming,
+          "His name is John.",
+          "What is his name?"
+        );
         return res.type("text/xml").send(twiml.toString());
       }
 
@@ -132,13 +144,15 @@ app.post("/webhook/twilio", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ===== STEP 4 =====
+    // ===== STEP 4 — HER NAME =====
     if (state.step === 4) {
-      const valid = ["her name is anna"];
-
-      if (!checkAnswer(incoming, valid)) {
-        twiml.message(`❌ ${incoming}`);
-        twiml.message(`✅ Her name is Anna.`);
+      if (!isExact(incoming, "Her name is Anna")) {
+        sendCorrection(
+          twiml,
+          incoming,
+          "Her name is Anna.",
+          "What is her name?"
+        );
         return res.type("text/xml").send(twiml.toString());
       }
 
@@ -148,7 +162,7 @@ app.post("/webhook/twilio", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    // ===== STEP 5 =====
+    // ===== STEP 5 — SURNAME =====
     if (state.step === 5) {
       state.step = 6;
 
@@ -159,11 +173,13 @@ app.post("/webhook/twilio", async (req, res) => {
 
     // ===== STEP 6 =====
     if (state.step === 6) {
-      const valid = ["your surname is smith"];
-
-      if (!checkAnswer(incoming, valid)) {
-        twiml.message(`❌ ${incoming}`);
-        twiml.message(`✅ Your surname is Smith.`);
+      if (!isExact(incoming, "Your surname is Smith")) {
+        sendCorrection(
+          twiml,
+          incoming,
+          "Your surname is Smith.",
+          "What is my surname?"
+        );
         return res.type("text/xml").send(twiml.toString());
       }
 
@@ -184,11 +200,13 @@ app.post("/webhook/twilio", async (req, res) => {
 
     // ===== STEP 8 =====
     if (state.step === 8) {
-      const valid = ["nice to meet you"];
-
-      if (!checkAnswer(incoming, valid)) {
-        twiml.message(`❌ ${incoming}`);
-        twiml.message(`✅ Nice to meet you.`);
+      if (!isExact(incoming, "Nice to meet you")) {
+        sendCorrection(
+          twiml,
+          incoming,
+          "Nice to meet you.",
+          "What do you say when you meet someone?"
+        );
         return res.type("text/xml").send(twiml.toString());
       }
 
@@ -217,6 +235,15 @@ app.post("/webhook/twilio", async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   }
 });
+
+// ================= HELPERS =================
+function capitalize(name) {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+function sendResponse(res, twiml) {
+  return res.type("text/xml").send(twiml.toString());
+}
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
