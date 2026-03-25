@@ -7,8 +7,12 @@ import twilio from "twilio";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ================= STATE =================
+const userState = {};
+
+// ================= OPENAI =================
 if (!process.env.OPENAI_API_KEY) {
-  console.error("Missing OPENAI_API_KEY environment variable");
+  console.error("Missing OPENAI_API_KEY");
   process.exit(1);
 }
 
@@ -16,100 +20,42 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const SYSTEM_PROMPT = `You are a British English tutor (RP accent style) teaching a beginner student through WhatsApp.
+// fallback inteligente (quando o aluno foge do script)
+async function aiFallback(message) {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      max_tokens: 100,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a friendly English tutor. Reply briefly and guide the student back to the lesson.",
+        },
+        { role: "user", content: message },
+      ],
+    });
 
-Your goal is to guide the student through Lesson 1 in a natural, conversational way.
-
-TEACHING STYLE:
-- Short messages (1 sentence preferred, max 2)
-- One question at a time
-- Friendly, human tone
-- Always respond to what the student said
-- Never repeat the same question unless the student was wrong
-- If correct → acknowledge briefly and continue
-- If wrong → correct naturally and continue
-- Keep the conversation flowing naturally
-
-IMPORTANT:
-- Do NOT sound like a robot or a test
-- Do NOT list steps
-- Do NOT explain grammar
-- Always behave like a real conversation
-
-LESSON STRUCTURE (but keep it natural, not rigid):
-
-1. Greeting
-Start when student says "Lesson 1":
-"Hello. What is your name?"
-
-If student answers:
-→ "Nice to meet you, [name]."
-→ Ask: "How are you today?"
-
-2. Name practice (contextual)
-Use natural variation:
-"What is your name?"
-"What is my name?"
-
-3. Introduce context (IMPORTANT FOR NATURALITY)
-When asking about others, ALWAYS create context first.
-
-Example:
-"This is John. He is a student."
-"What is his name?"
-
-"This is Anna. She is a teacher."
-"What is her name?"
-
-4. Surname
-Ask naturally:
-"What is your surname?"
-"My surname is Smith. What is my surname?"
-
-5. Pronouns (context-based)
-Always introduce a person before asking.
-
-6. Numbers / phone number
-Ask:
-"What is your phone number?"
-
-Encourage:
-"Say the numbers one by one."
-
-7. Polite expressions
-Teach:
-"Nice to meet you."
-Then ask:
-"What do you say when you meet someone?"
-
-8. Titles
-Ask:
-"Are you Mr, Mrs, or Miss?"
-Then:
-"Am I Mr Smith?"
-
-RULES:
-- NEVER restart unless user says "Lesson 1"
-- NEVER jump steps randomly
-- ALWAYS adapt to what the student says
-- ALWAYS keep context before questions like "his/her"
-- KEEP IT NATURAL
-
-Your job is not to test — your job is to guide a real conversation.`;
-
-async function getChatReply(message) {
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    max_tokens: 256,
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: message },
-    ],
-  });
-
-  return completion.choices[0]?.message?.content ?? "";
+    return completion.choices[0]?.message?.content || "";
+  } catch {
+    return "Let's continue the lesson 🙂";
+  }
 }
 
+// ================= HELPERS =================
+function cleanName(text) {
+  return text.replace(/my name is/i, "").trim();
+}
+
+function isShort(text) {
+  return text.length < 2;
+}
+
+function looksLikePhone(text) {
+  return /[0-9]/.test(text);
+}
+
+// ================= EXPRESS =================
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -118,49 +64,140 @@ app.get("/", (_req, res) => {
   res.send("Highlands server is running");
 });
 
-app.post("/api/chat-simple", async (req, res) => {
-  const message = (req.body.message ?? "").trim();
-
-  if (!message) {
-    return res.status(400).json({ error: "message is required" });
-  }
-
-  try {
-    const reply = await getChatReply(message);
-    return res.json({ reply });
-  } catch (err) {
-    console.error("chat-simple error:", err?.message || err);
-    return res.status(500).json({ error: "Failed to get response from OpenAI" });
-  }
-});
-
+// ================= TWILIO WEBHOOK =================
 app.post("/webhook/twilio", async (req, res) => {
-  const incomingMessage = (req.body.Body ?? "").trim();
+  const incoming = (req.body.Body || "").trim();
+  const userId = req.body.From;
 
-  if (!incomingMessage) {
-    const twiml = new twilio.twiml.MessagingResponse();
-    return res.type("text/xml").send(twiml.toString());
+  if (!userState[userId]) {
+    userState[userId] = {
+      step: 0,
+      name: "",
+      surname: "",
+    };
   }
 
-  try {
-    const reply =
-      (await getChatReply(incomingMessage)) ||
-      "Sorry, I couldn't generate a reply right now.";
+  const state = userState[userId];
+  let reply = "";
 
+  try {
+    // ================= RESET =================
+    if (incoming.toLowerCase() === "lesson 1") {
+      state.step = 1;
+      state.name = "";
+      state.surname = "";
+
+      reply = "Hello. What is your name?";
+    }
+
+    // ================= STEP 1 — NAME =================
+    else if (state.step === 1) {
+      if (isShort(incoming)) {
+        reply = "Please tell me your name 🙂";
+      } else {
+        state.name = cleanName(incoming);
+        state.step = 2;
+
+        reply = `Nice to meet you, ${state.name}. How are you today?`;
+      }
+    }
+
+    // ================= STEP 2 — HOW ARE YOU =================
+    else if (state.step === 2) {
+      state.step = 3;
+      reply = "Good. What is your name?";
+    }
+
+    // ================= STEP 3 — NAME STRUCTURE =================
+    else if (state.step === 3) {
+      state.step = 4;
+      reply = `Good. My name is James. What is my name?`;
+    }
+
+    // ================= STEP 4 — CONTEXT (HIS) =================
+    else if (state.step === 4) {
+      state.step = 5;
+      reply = "This is John. He is a student. What is his name?";
+    }
+
+    // ================= STEP 5 — CONTEXT (HER) =================
+    else if (state.step === 5) {
+      state.step = 6;
+      reply = "Good. This is Anna. She is a teacher. What is her name?";
+    }
+
+    // ================= STEP 6 — SURNAME =================
+    else if (state.step === 6) {
+      state.step = 7;
+      reply = "What is your surname?";
+    }
+
+    // ================= STEP 7 — SURNAME STRUCTURE =================
+    else if (state.step === 7) {
+      state.surname = incoming;
+      state.step = 8;
+
+      reply = "My surname is Smith. What is my surname?";
+    }
+
+    // ================= STEP 8 — PHONE =================
+    else if (state.step === 8) {
+      state.step = 9;
+      reply = "What is your phone number?";
+    }
+
+    // ================= STEP 9 — PHONE VALIDATION =================
+    else if (state.step === 9) {
+      if (!looksLikePhone(incoming)) {
+        reply = "Please use numbers 🙂";
+      } else {
+        state.step = 10;
+        reply =
+          "Good. When you meet someone, you say: nice to meet you. What do you say?";
+      }
+    }
+
+    // ================= STEP 10 — POLITE =================
+    else if (state.step === 10) {
+      state.step = 11;
+      reply = "Good. Are you Mr, Mrs, or Miss?";
+    }
+
+    // ================= STEP 11 — TITLES =================
+    else if (state.step === 11) {
+      state.step = 12;
+      reply = "Good. Am I Mr Smith?";
+    }
+
+    // ================= FINAL =================
+    else if (state.step === 12) {
+      state.step = 999;
+
+      reply =
+        "Excellent. Lesson complete 🎉 Type 'Lesson 1' to restart.";
+    }
+
+    // ================= FALLBACK =================
+    else {
+      reply = await aiFallback(incoming);
+    }
+
+    // ================= SEND =================
     const twiml = new twilio.twiml.MessagingResponse();
     twiml.message(reply);
 
     return res.type("text/xml").send(twiml.toString());
   } catch (err) {
-    console.error("Twilio webhook error:", err?.message || err);
+    console.error(err);
 
     const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message("Sorry, I could not process your message. Please try again.");
+    twiml.message("Something went wrong. Please try again.");
 
     return res.type("text/xml").send(twiml.toString());
   }
 });
 
+// ================= START =================
 app.listen(PORT, () => {
   console.log(`Highlands server running on port ${PORT}`);
 });
