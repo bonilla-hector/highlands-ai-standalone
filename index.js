@@ -20,48 +20,46 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ================= AI CORRECTION =================
-async function correctAndRespond(userInput, instruction) {
+// ================= AI EVALUATION =================
+async function evaluateAnswer(userInput, expectedPattern, correctAnswer) {
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      max_tokens: 120,
+      max_tokens: 60,
       messages: [
         {
           role: "system",
           content: `
-You are a friendly British English tutor.
+You are an English teacher.
 
-Your job:
-1. If the student's sentence has a mistake → correct it naturally
-2. If correct → briefly acknowledge
-3. Continue the lesson based on instruction
-
-RULES:
-- Keep it VERY short (1–2 sentences)
-- Be natural (like WhatsApp)
+Rules:
+- If correct → reply ONLY: CORRECT
+- If incorrect → reply ONLY with the correct sentence
 - No explanations
-- No grammar terms
-
-Examples:
-Student: I fine
-Reply: I'm fine 🙂 Good. (continue)
-
-Student: My name is John
-Reply: Nice 🙂 (continue)
+- No extra text
 `,
         },
         {
           role: "user",
-          content: `Student: "${userInput}" \nNext step: ${instruction}`,
+          content: `
+Student: "${userInput}"
+Expected: ${expectedPattern}
+Correct answer: ${correctAnswer}
+`,
         },
       ],
     });
 
-    return completion.choices[0]?.message?.content || "";
+    const result = completion.choices[0]?.message?.content?.trim();
+
+    if (!result || result.toUpperCase().includes("CORRECT")) {
+      return { correct: true };
+    }
+
+    return { correct: false, correction: result };
   } catch (err) {
-    console.error("AI error:", err.message);
-    return instruction;
+    console.error(err);
+    return { correct: true };
   }
 }
 
@@ -88,122 +86,170 @@ app.post("/webhook/twilio", async (req, res) => {
   }
 
   const state = userState[userId];
-  let reply = "";
+  const twiml = new twilio.twiml.MessagingResponse();
 
   try {
-    // ================= START =================
+    // ========= START =========
     if (incoming.toLowerCase() === "lesson 1") {
       state.step = 1;
       state.name = "";
       state.surname = "";
 
-      reply = "Great! Let's start Lesson 1 🙂\n\nWhat's your name?";
+      twiml.message("Great! Let's start Lesson 1 🙂");
+      twiml.message("What's your name?");
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    // ================= STEP 1 — NAME =================
-    else if (state.step === 1) {
+    // ========= STEP 1 — NAME =========
+    if (state.step === 1) {
       state.name = incoming.replace(/my name is/i, "").trim();
       state.step = 2;
 
-      reply = `Nice to meet you, ${state.name}. How are you today?`;
+      twiml.message(`Nice to meet you, ${state.name}.`);
+      twiml.message("How are you today?");
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    // ================= STEP 2 — HOW ARE YOU =================
-    else if (state.step === 2) {
+    // ========= STEP 2 — HOW ARE YOU =========
+    if (state.step === 2) {
+      const evalRes = await evaluateAnswer(
+        incoming,
+        "I am fine / I'm fine",
+        "I'm fine."
+      );
+
+      if (!evalRes.correct) {
+        twiml.message(`❌ ${incoming}`);
+        twiml.message(`✅ ${evalRes.correction}`);
+        return res.type("text/xml").send(twiml.toString());
+      }
+
       state.step = 3;
 
-      reply = await correctAndRespond(
-        incoming,
-        "Say: Good. This is John. He is a student. What is his name?"
-      );
+      twiml.message("Good 🙂");
+      twiml.message("This is John. He is a student. What is his name?");
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    // ================= STEP 3 — HIS =================
-    else if (state.step === 3) {
+    // ========= STEP 3 — HIS =========
+    if (state.step === 3) {
+      const evalRes = await evaluateAnswer(
+        incoming,
+        "His name is John",
+        "His name is John."
+      );
+
+      if (!evalRes.correct) {
+        twiml.message(`❌ ${incoming}`);
+        twiml.message(`✅ ${evalRes.correction}`);
+        return res.type("text/xml").send(twiml.toString());
+      }
+
       state.step = 4;
 
-      reply = await correctAndRespond(
-        incoming,
-        "Say: Good. This is Anna. She is a teacher. What is her name?"
-      );
+      twiml.message("Good 🙂");
+      twiml.message("This is Anna. She is a teacher. What is her name?");
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    // ================= STEP 4 — HER =================
-    else if (state.step === 4) {
+    // ========= STEP 4 — HER =========
+    if (state.step === 4) {
+      const evalRes = await evaluateAnswer(
+        incoming,
+        "Her name is Anna",
+        "Her name is Anna."
+      );
+
+      if (!evalRes.correct) {
+        twiml.message(`❌ ${incoming}`);
+        twiml.message(`✅ ${evalRes.correction}`);
+        return res.type("text/xml").send(twiml.toString());
+      }
+
       state.step = 5;
 
-      reply = await correctAndRespond(
-        incoming,
-        "Ask: What is your surname?"
-      );
+      twiml.message("Good 🙂");
+      twiml.message("What is your surname?");
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    // ================= STEP 5 — SURNAME =================
-    else if (state.step === 5) {
+    // ========= STEP 5 — SURNAME =========
+    if (state.step === 5) {
       state.surname = incoming;
       state.step = 6;
 
-      reply = await correctAndRespond(
-        incoming,
-        "Say: My surname is Smith. What is my surname?"
-      );
+      twiml.message("Good 🙂");
+      twiml.message("My surname is Smith. What is my surname?");
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    // ================= STEP 6 =================
-    else if (state.step === 6) {
+    // ========= STEP 6 =========
+    if (state.step === 6) {
+      const evalRes = await evaluateAnswer(
+        incoming,
+        "Your surname is Smith",
+        "Your surname is Smith."
+      );
+
+      if (!evalRes.correct) {
+        twiml.message(`❌ ${incoming}`);
+        twiml.message(`✅ ${evalRes.correction}`);
+        return res.type("text/xml").send(twiml.toString());
+      }
+
       state.step = 7;
 
-      reply = await correctAndRespond(
-        incoming,
-        "Ask: What is your phone number?"
-      );
+      twiml.message("Good 🙂");
+      twiml.message("What is your phone number?");
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    // ================= STEP 7 =================
-    else if (state.step === 7) {
+    // ========= STEP 7 =========
+    if (state.step === 7) {
       state.step = 8;
 
-      reply = await correctAndRespond(
-        incoming,
-        "Say: Good 🙂 When you meet someone, you say 'nice to meet you'. What do you say?"
-      );
+      twiml.message("Good 🙂");
+      twiml.message("When you meet someone, you say: nice to meet you. What do you say?");
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    // ================= STEP 8 =================
-    else if (state.step === 8) {
+    // ========= STEP 8 =========
+    if (state.step === 8) {
+      const evalRes = await evaluateAnswer(
+        incoming,
+        "Nice to meet you",
+        "Nice to meet you."
+      );
+
+      if (!evalRes.correct) {
+        twiml.message(`❌ ${incoming}`);
+        twiml.message(`✅ ${evalRes.correction}`);
+        return res.type("text/xml").send(twiml.toString());
+      }
+
       state.step = 9;
 
-      reply = await correctAndRespond(
-        incoming,
-        "Ask: Are you Mr, Mrs, or Miss?"
-      );
+      twiml.message("Good 🙂");
+      twiml.message("Are you Mr, Mrs, or Miss?");
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    // ================= STEP 9 =================
-    else if (state.step === 9) {
+    // ========= STEP 9 =========
+    if (state.step === 9) {
       state.step = 10;
 
-      reply = await correctAndRespond(
-        incoming,
-        "Ask: Am I Mr Smith?"
-      );
+      twiml.message("Good 🙂");
+      twiml.message("Am I Mr Smith?");
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    // ================= FINAL =================
-    else {
-      reply = "Excellent 🎉 Lesson complete. Type 'Lesson 1' to restart.";
-    }
-
-    const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message(reply);
-
+    // ========= FINAL =========
+    twiml.message("Excellent 🎉 Lesson complete. Type 'Lesson 1' to restart.");
     return res.type("text/xml").send(twiml.toString());
   } catch (err) {
     console.error(err);
 
-    const twiml = new twilio.twiml.MessagingResponse();
     twiml.message("Something went wrong. Please try again.");
-
     return res.type("text/xml").send(twiml.toString());
   }
 });
